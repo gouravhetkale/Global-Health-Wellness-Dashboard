@@ -1,4 +1,3 @@
-```
 # 🌱 Global Eco-Health Tracker
 
 A Streamlit dashboard that gives instant Health Wellness Index scores 
@@ -45,7 +44,3 @@ and a 2027 ML-powered forecast using Random Forest.
 ## 🛠️ Tech Stack
 Python · Streamlit · Pandas · Scikit-learn · Plotly · Joblib
 
-
----
-
-Clean and to the point! Want any section added or removed?
