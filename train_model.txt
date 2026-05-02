@@ -1,0 +1,110 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder
+import joblib
+import os
+
+def calculate_health_index(df):
+    """
+    Calculates a 0-100 score with high contrast and better predictability.
+    Uses Smoothed Weighted Scaling to improve Model Accuracy (R^2).
+    """
+    def smooth_scale(series, invert=False):
+        s_min, s_max = series.min(), series.max()
+        if s_max == s_min: 
+            return series * 0 + 50 
+        scaled = (series - s_min) / (s_max - s_min) * 100
+        return 100 - scaled if invert else scaled
+
+    # Step 1: Smoothly scale individual components
+    access_s = smooth_scale(df['Healthcare Access (%)'])
+    mortality_s = smooth_scale(df['Mortality Rate (%)'], invert=True)
+    doctors_s = smooth_scale(df['Doctors per 1000'])
+    income_s = smooth_scale(np.log1p(df['Per Capita Income (USD)']))
+
+    # Step 2: Weighted Score Calculation
+    raw_index = (
+        (access_s * 0.4) + 
+        (mortality_s * 0.3) +
+        (doctors_s * 0.2) + 
+        (income_s * 0.1)
+    )
+
+    # Step 3: Final contrast stretch for the 0-100 spread
+    final_min = raw_index.min()
+    final_max = raw_index.max()
+    
+    if final_max != final_min:
+        return (raw_index - final_min) / (final_max - final_min) * 100
+    return raw_index
+
+def train_and_save_model(filepath):
+    print("🚀 Training the Eco-Health Forecast Model (Optimised Accuracy)...")
+    
+    # Current working directory info for debugging
+    current_dir = os.getcwd()
+    print(f"📂 Current Working Directory: {current_dir}")
+
+    try:
+        df = pd.read_csv(filepath).dropna()
+    except FileNotFoundError:
+        print(f"❌ Error: {filepath} not found in the current folder.")
+        return
+
+    df['Health_Index'] = calculate_health_index(df)
+
+    # Feature selection
+    features = [
+        'Healthcare Access (%)', 'Doctors per 1000', 'Hospital Beds per 1000',
+        'Per Capita Income (USD)', 'Education Index', 'Urbanization Rate (%)',
+        'Disease Category'
+    ]
+    
+    X = df[features].copy()
+    y = df['Health_Index']
+
+    le = LabelEncoder()
+    X['Disease Category'] = le.fit_transform(X['Disease Category'])
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    print("⚙️ Training model... please wait.")
+    model = RandomForestRegressor(
+        n_estimators=100, 
+        max_depth=12,
+        min_samples_leaf=5,
+        n_jobs=-1, 
+        random_state=42
+    )
+    model.fit(X_train, y_train)
+
+    # --- SAVE PROCESS ---
+    model_filename = 'health_model.pkl'
+    save_path = os.path.join(current_dir, model_filename)
+    
+    data_to_save = {
+        'model': model, 
+        'encoder': le, 
+        'features': features
+    }
+
+    try:
+        joblib.dump(data_to_save, save_path)
+        print(f"✅ Model successfully saved to: {save_path}")
+        
+        # Physical Verification
+        if os.path.exists(save_path):
+            print(f"✔️ DISK CHECK: File confirmed at {save_path} ({os.path.getsize(save_path) / 1024:.2f} KB)")
+        else:
+            print("❌ DISK CHECK FAILED: File was not found after saving!")
+            
+    except Exception as e:
+        print(f"❌ Critical Error while saving: {str(e)}")
+    
+    accuracy = model.score(X_test, y_test)
+    print(f"📊 Accuracy Score (R^2): {accuracy:.4f}")
+
+if __name__ == "__main__":
+    train_and_save_model('Global Health Statistics.csv')

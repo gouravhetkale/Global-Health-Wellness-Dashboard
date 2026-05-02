@@ -1,0 +1,217 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+import joblib
+import os
+
+# Page configuration for a clean, app-like feel
+st.set_page_config(page_title="Global Eco-Health Tracker", page_icon="🌱", layout="centered")
+
+@st.cache_data
+def load_and_score_data():
+    """
+    Load data and calculate a high-contrast Health Index using 
+    Percentile Ranking to ensure a wide 0-100 spread.
+    """
+    df = pd.read_csv('Global Health Statistics.csv').dropna()
+    
+    # Step 1: Calculate average metrics per country first
+    # This prevents row-level noise from diluting the differences
+    country_stats = df.groupby('Country').agg({
+        'Healthcare Access (%)': 'mean',
+        'Mortality Rate (%)': 'mean',
+        'Doctors per 1000': 'mean',
+        'Per Capita Income (USD)': 'mean'
+    })
+
+    # Step 2: Scale components using Percentile Ranks (0-100)
+    # This forces the data to use the full range regardless of outliers
+    def get_rank_score(series, invert=False):
+        ranks = series.rank(pct=True) * 100
+        return 100 - ranks if invert else ranks
+
+    access_r = get_rank_score(country_stats['Healthcare Access (%)'])
+    mortality_r = get_rank_score(country_stats['Mortality Rate (%)'], invert=True)
+    docs_r = get_rank_score(country_stats['Doctors per 1000'])
+    income_r = get_rank_score(np.log1p(country_stats['Per Capita Income (USD)']))
+
+    # Step 3: Weighted Combined Rank
+    raw_weighted = (
+        (access_r * 0.4) + 
+        (mortality_r * 0.3) +
+        (docs_r * 0.2) + 
+        (income_r * 0.1)
+    )
+
+    # Step 4: Final Percentile Stretch
+    # This guarantees the top country is 100 and the bottom is 0
+    final_scores = raw_weighted.rank(pct=True) * 100
+    
+    # Map these distinct scores back to the main dataframe
+    score_dict = final_scores.to_dict()
+    df['Health_Index'] = df['Country'].map(score_dict)
+        
+    return df
+
+def load_model():
+    if os.path.exists('health_model.pkl'):
+        return joblib.load('health_model.pkl')
+    return None
+
+def get_status(score):
+    if score >= 75: return "Safe / Excellent", "#2ecc71", "✅"
+    if score >= 40: return "Moderate / Stable", "#f1c40f", "⚠️" # Adjusted threshold for better distribution
+    return "High Risk / Critical", "#e74c3c", "🚨"
+
+# --- APPLICATION START ---
+
+df = load_and_score_data()
+model_data = load_model()
+global_avg_score = df['Health_Index'].mean()
+
+st.title("🌱 Global Eco-Health Tracker")
+st.write("Instant health wellness scores and environmental forecasts for every country.")
+
+# --- MAIN FEATURE: COUNTRY SEARCH ---
+st.subheader("🔍 Search Location")
+search_query = st.selectbox("Type a country name to see the Health Index:", 
+                            options=[""] + sorted(df['Country'].unique().tolist()))
+
+if search_query:
+    # Filter data for specific country
+    country_df_full = df[df['Country'] == search_query]
+    
+    # The score is now consistent across all rows for the country
+    score = country_df_full['Health_Index'].iloc[0]
+    status, color, icon = get_status(score)
+    
+    # BIG SCORE CARD
+    st.markdown(f"""
+        <div style="background-color:{color}; padding:30px; border-radius:15px; text-align:center; color:white; margin-bottom:20px;">
+            <p style="margin:0; font-size:18px; text-transform:uppercase; letter-spacing:2px;">Health Wellness Index</p>
+            <h1 style="margin:0; font-size:75px; line-height:1;">{score:.0f}</h1>
+            <p style="margin:0; font-size:24px; font-weight:bold;">{icon} {status}</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # PEER COMPARISON
+    diff_from_avg = score - global_avg_score
+    col_comp1, col_comp2 = st.columns(2)
+    with col_comp1:
+        st.metric("Country Score", f"{score:.0f}")
+    with col_comp2:
+        st.metric("Vs. Global Average", f"{global_avg_score:.0f}", delta=f"{diff_from_avg:+.1f}")
+
+    # 2027 FORECAST SECTION
+    if model_data:
+        st.write("---")
+        st.subheader("🔮 2027 Health Forecast")
+        
+        le = model_data['encoder']
+        model = model_data['model']
+        features = model_data['features']
+        
+        country_avg_row = country_df_full.mean(numeric_only=True)
+        
+        future_input = pd.DataFrame([[
+            country_avg_row['Healthcare Access (%)'],
+            country_avg_row['Doctors per 1000'],
+            country_avg_row['Hospital Beds per 1000'],
+            country_avg_row['Per Capita Income (USD)'] * 1.03,
+            country_avg_row['Education Index'],
+            country_avg_row['Urbanization Rate (%)'] * 1.02,
+            le.transform([country_df_full['Disease Category'].iloc[0]])[0] 
+        ]], columns=features)
+        
+        predicted_score = model.predict(future_input)[0]
+        # Clipping prediction to valid range
+        predicted_score = max(0, min(100, predicted_score))
+        trend_val = predicted_score - score
+        
+        f_col1, f_col2 = st.columns(2)
+        with f_col1:
+            st.metric("Forecasted Score (2027)", f"{predicted_score:.0f}")
+        with f_col2:
+            st.metric("Forecasted Trend", f"{trend_val:+.1f}", delta=f"{trend_val:+.1f}")
+            
+        if trend_val > 0.5:
+            st.success(f"Trending Up: Predicted improvements in economics and access will likely boost wellness.")
+        elif trend_val < -0.5:
+            st.error(f"Declining Trend: Rising urbanization or mortality risks may lower the score.")
+
+    st.write("---")
+    
+    # DISEASE RISK PROFILE
+    st.subheader(f"🧬 Disease Risk Profile: {search_query}")
+    tab_bar, tab_pie = st.tabs(["📊 Prevalence Ranking", "🍰 Category Mix"])
+    
+    with tab_bar:
+        disease_mix = country_df_full.groupby('Disease Name')['Prevalence Rate (%)'].mean().reset_index()
+        total_prevalence = disease_mix['Prevalence Rate (%)'].sum()
+        disease_mix['Share (%)'] = (disease_mix['Prevalence Rate (%)'] / total_prevalence) * 100
+        disease_mix = disease_mix.sort_values(by='Prevalence Rate (%)', ascending=True)
+        
+        fig_disease = px.bar(
+            disease_mix, x='Prevalence Rate (%)', y='Disease Name', orientation='h',
+            text=disease_mix['Share (%)'].apply(lambda x: f'{x:.1f}% share'),
+            color='Prevalence Rate (%)', color_continuous_scale='Reds'
+        )
+        fig_disease.update_traces(textposition='outside')
+        fig_disease.update_layout(showlegend=False, height=400, margin=dict(l=0, r=50, t=10, b=10))
+        st.plotly_chart(fig_disease, width="stretch")
+
+    with tab_pie:
+        category_mix = country_df_full.groupby('Disease Category')['Prevalence Rate (%)'].mean().reset_index()
+        fig_pie = px.pie(category_mix, values='Prevalence Rate (%)', names='Disease Category', hole=0.4,
+                         color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0))
+        st.plotly_chart(fig_pie, width="stretch")
+
+    st.write("---")
+    st.subheader("🏥 Infrastructure Audit")
+    
+    avg_docs = country_df_full['Doctors per 1000'].mean()
+    avg_beds = country_df_full['Hospital Beds per 1000'].mean()
+    
+    if avg_docs < 1.0 or avg_beds < 2.0:
+        infra_status = "Critical Shortage"
+        infra_color = "red"
+        infra_reason = "Basic medical capacity is severely lacking, with resources failing to meet international safety standards."
+    elif avg_docs < 2.5 or avg_beds < 5.0:
+        infra_status = "Developing"
+        infra_color = "orange"
+        if score < 40:
+            infra_reason = "Despite some growth, high mortality rates or poor economic access are significantly negating infrastructure gains."
+        else:
+            infra_reason = "The system is evolving but still lacks the depth required to handle large-scale health crises effectively."
+    else:
+        infra_status = "Advanced"
+        infra_color = "green"
+        infra_reason = "Superior medical resources are available, with high capacity and a robust network to support population needs."
+        
+    st.markdown(f"Current System Rating: **:{infra_color}[{infra_status}]**")
+    st.info(f"**Reasoning:** {infra_reason}")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Medical Access", f"{country_df_full['Healthcare Access (%)'].mean():.1f}%")
+    with col2:
+        st.metric("Doctors (per 1k)", f"{avg_docs:.1f}")
+    with col3:
+        st.metric("Hospital Beds (per 1k)", f"{avg_beds:.1f}")
+
+else:
+    st.info("Please search for a country above to get started.")
+    st.write("---")
+    st.subheader("Top Global Health Environments")
+    top_10 = df.groupby('Country')['Health_Index'].mean().sort_values(ascending=False).head(10).reset_index()
+    st.table(top_10.assign(Rank=range(1, 11)).set_index('Rank')[['Country', 'Health_Index']].style.format({'Health_Index': '{:.1f}'}))
+    
+    st.write("---")
+    st.metric("Average Global Health Index", f"{global_avg_score:.1f}")
+    st.caption("The index uses Percentile Ranking to spread countries across the 0-100 scale for maximum clarity.")
+
+st.markdown("---")
+st.caption("Eco-Health Tracker | Built for Simplified Global Health Analysis | Indian English Edition")
